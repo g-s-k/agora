@@ -10,5 +10,21 @@ jobs:
           sudo apt-get install libasound2-dev
       - name: Check out repository code
         uses: actions/checkout@v2
-      - run: cargo test
-      - run: cargo build
+      - name: Run tests
+        run: cargo test
+      - name: Build package
+        run: cargo build
+  Deploy:
+    needs: Build
+    if: github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v2
+      - name: Build docs
+        run: cargo doc
+      - name: Deploy
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./target/doc

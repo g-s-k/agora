@@ -10,7 +10,7 @@
 //! modified at any time, and changes will take effect the next time you [process a
 //! buffer](Graph::process).
 //!
-//! ### Assumptions and caveats
+//! ## Assumptions and caveats
 //!
 //! - This library is built to work with double-precision floating point signals.
 //! - Nodes can only consume one stream of input data and produce one stream of output data.
@@ -23,13 +23,13 @@
 //!
 //! - The time complexity of processing a buffer of data is linear in the number of nodes, and
 //! memory usage is linear in both the number of nodes and the specified buffer size.
-//! - The time complexity of adding a node is constant (amortized).
+//! - The time complexity of adding or replacing a node, or removing a connection, is constant (amortized).
 //! - The time complexity of removing a node is linear in the number of nodes.
-//! - The time complexity of connecting two nodes is exponential in the number of nodes. This is
-//! required in order to prevent cycles in the graph.
-//! - The time complexity of disconnecting two notes is constant (amortized).
+//! - The time complexity of connecting two nodes is proportional to the number of nodes times the
+//! number of existing connections. This is due to the recalculation of the critical path through
+//! the graph.
 //!
-//! ### Example
+//! ## Example
 //! ```
 //! # use agora::{Buffer, Node, Graph};
 //! # const BUF_LEN: usize = 320;
@@ -54,6 +54,45 @@
 //! graph.process(&mut buffer);
 //! assert_eq!(buffer, [3.0; BUF_LEN]);
 //! ```
+//!
+//! ## Afterthoughts
+//!
+//! There are a few design decisions made in this library that may deserve more consideration.
+//!
+//! ### Use of const generics for buffer size and sample rate
+//!
+//! While this is very nice in terms of safety (incompatible processing elements are found
+//! immediately at compile time), it is not flexible at all to different platforms and
+//! environments. There are many differences between different host operating systems in terms
+//! of handling audio, and it may be preferable to support some level of configurability if
+//! building an application intended to be cross-platform.
+//!
+//! ### Use of standard library
+//!
+//! The Rust standard library provides an excellent developer experience - however, there are
+//! some platforms which do not support it, or at least the memory allocation mechanisms it
+//! uses. Building a `no_std` version of this library would not be possible in its current
+//! incarnation, and would require significant changes to the code.
+//!
+//! ### I/O limitations
+//!
+//! Nodes are only given one buffer that is shared between input and output. Most platforms
+//! support (at least) stereo I/O, and many operations (such as dynamically mixing signals)
+//! would be made much easier with more flexibility here. The `cpal` library (used here in the
+//! example application) utilizes interleaved audio - maybe this would be the right way to
+//! handle it.
+//!
+//! ### Parallelization
+//!
+//! This implementation is single-threaded. It would not require _significant_ refactoring to
+//! parallelize, but _some_ work would still be necessary.
+//!
+//! ### Panics
+//!
+//! The only (anticipated) panics in this library are in [Graph::process], essentially as
+//! assertions on the validity of the graph's construction. These could be replaced with returned
+//! errors without much refactoring effort, but since they are checking the internal logic of the
+//! library it may be best to keep them as is.
 
 #![warn(missing_docs)]
 
@@ -172,50 +211,32 @@ impl<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> Graph<BUFFER_SIZE, SAMP
     ///
     /// ### Errors
     ///
-    /// This method will return a [ConnectError] under the following conditions:
-    ///
-    /// - Attempting to connect a node to itself (`source == sink`)
-    /// - Attempting to create a cycle in the node graph
-    pub fn connect(
-        &mut self,
-        source: NodeReference,
-        sink: NodeReference,
-    ) -> Result<(), ConnectError> {
-        // no self connections or cycles allowed
-        if source == sink {
-            return Err(ConnectError::SelfReference);
-        }
-        if self.would_have_cycle(source, sink) {
-            return Err(ConnectError::CyclicalReference);
-        }
-
+    /// This method will return an [Error] if a cycle would be introduced in the graph.
+    pub fn connect(&mut self, source: NodeReference, sink: NodeReference) -> Result<(), Error> {
         self.connections.entry(source.0).or_default().insert(sink.0);
         self.connections_reverse
             .entry(sink.0)
             .or_default()
             .insert(source.0);
 
-        self.refresh_node_order();
-
-        Ok(())
-    }
-
-    /// Check for a potential cycle in the graph, before creating one.
-    fn would_have_cycle(&self, source: NodeReference, sink: NodeReference) -> bool {
-        self.connections_reverse
-            .get(&source.0)
-            .map(|dependencies| {
-                // do a depth first search
-                dependencies
-                    .iter()
-                    .any(|&d| d == sink.0 || self.would_have_cycle(NodeReference(d), sink))
-            })
-            .unwrap_or(false)
+        match self.refresh_node_order() {
+            Ok(new_order) => {
+                self.node_order = new_order;
+                Ok(())
+            }
+            Err(e) => {
+                self.disconnect(source, sink);
+                Err(e)
+            }
+        }
     }
 
     /// Rebuild processing order via topological sort
-    fn refresh_node_order(&mut self) {
-        self.node_order.clear();
+    ///
+    /// Note that this method does not mutate the Graph just yet - this is because an error might
+    /// be found during this process.
+    fn refresh_node_order(&self) -> Result<Vec<usize>, Error> {
+        let mut new_node_order = Vec::new();
         let mut incoming_edges_copy = self.connections_reverse.clone();
         let mut no_incoming_edges: Vec<_> = self
             .nodes
@@ -232,29 +253,33 @@ impl<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> Graph<BUFFER_SIZE, SAMP
         no_incoming_edges.push(EXTERNAL_INPUT.0);
 
         // basically Kahn's algo, https://en.wikipedia.org/wiki/Topological_sorting#Kahn's_algorithm
-        let empty_hash_set = HashSet::new();
-        while !no_incoming_edges.is_empty() {
-            let current_node = no_incoming_edges.pop().unwrap();
+        while let Some(current_node) = no_incoming_edges.pop() {
             if current_node != EXTERNAL_INPUT.0 {
-                self.node_order.push(current_node);
+                new_node_order.push(current_node);
             }
 
-            for &destination in self
-                .connections
-                .get(&current_node)
-                .unwrap_or(&empty_hash_set)
-            {
-                incoming_edges_copy.entry(destination).and_modify(|e| {
-                    e.remove(&current_node);
-                });
-                if incoming_edges_copy
-                    .get(&destination)
-                    .map(HashSet::is_empty)
-                    .unwrap_or(true)
-                {
-                    no_incoming_edges.push(destination);
+            if let Some(destinations) = self.connections.get(&current_node) {
+                for &destination in destinations {
+                    incoming_edges_copy.entry(destination).and_modify(|e| {
+                        e.remove(&current_node);
+                    });
+                    if incoming_edges_copy
+                        .get(&destination)
+                        .map(HashSet::is_empty)
+                        .unwrap_or(true)
+                    {
+                        no_incoming_edges.push(destination);
+                    }
                 }
             }
+        }
+
+        // check for remaining edges (cycles)
+        incoming_edges_copy.retain(|_, sources| !sources.is_empty());
+        if !incoming_edges_copy.is_empty() {
+            Err(Error::CyclicalReference)
+        } else {
+            Ok(new_node_order)
         }
     }
 
@@ -283,7 +308,10 @@ impl<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> Graph<BUFFER_SIZE, SAMP
 
         let empty_hash_set = HashSet::new();
         for key in &self.node_order {
-            let node = self.nodes.get_mut(&key).unwrap();
+            let node = self
+                .nodes
+                .get_mut(&key)
+                .expect("Tried to access node that does not exist - this indicates a logic error in agora::Graph");
             let mut buf = [0.0; BUFFER_SIZE];
             sum_buffers(
                 self.connections_reverse
@@ -331,9 +359,7 @@ impl<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> Graph<BUFFER_SIZE, SAMP
 
 /// Describes the type of error encountered when [making a connection](Graph::connect) between Nodes.
 #[derive(Debug, PartialEq)]
-pub enum ConnectError {
-    /// Returned when a connection is attempted between a Node and itself.
-    SelfReference,
+pub enum Error {
     /// Returned when a connection is attempted that would create a cycle in the graph.
     CyclicalReference,
 }
@@ -361,7 +387,7 @@ where
 
 #[cfg(test)]
 mod node_management {
-    use super::{Buffer, ConnectError, Graph, Node};
+    use super::{Buffer, Error, Graph, Node};
 
     struct NopNode;
     impl<const B: usize, const S: usize> Node<B, S> for NopNode {
@@ -405,7 +431,7 @@ mod node_management {
     }
 
     #[test]
-    fn can_connect_nodes() -> Result<(), ConnectError> {
+    fn can_connect_nodes() -> Result<(), Error> {
         let mut g = Graph::<1, 1>::default();
         let node_a = g.add_node(Box::new(NopNode));
         let node_b = g.add_node(Box::new(NopNode));
@@ -418,7 +444,7 @@ mod node_management {
         let node_a = g.add_node(Box::new(NopNode));
         let connect_result = g.connect(node_a, node_a);
         assert!(connect_result.is_err());
-        assert_eq!(connect_result.unwrap_err(), ConnectError::SelfReference);
+        assert_eq!(connect_result.unwrap_err(), Error::CyclicalReference);
     }
 
     #[test]
@@ -431,7 +457,7 @@ mod node_management {
         assert!(g.connect(node_b, node_c).is_ok());
         let connect_result = g.connect(node_c, node_a);
         assert!(connect_result.is_err());
-        assert_eq!(connect_result.unwrap_err(), ConnectError::CyclicalReference);
+        assert_eq!(connect_result.unwrap_err(), Error::CyclicalReference);
     }
 
     #[test]
@@ -477,7 +503,7 @@ mod signal_processing {
     fn processes_external_signal() {
         let mut g = Graph::<20, 1>::default();
         let node_a = g.add_node(Box::new(DcOffsetNode(-2.0)));
-        g.connect(EXTERNAL_INPUT, node_a).unwrap();
+        assert!(g.connect(EXTERNAL_INPUT, node_a).is_ok());
         let mut buffer = [1.0; 20];
         g.process(&mut buffer);
         assert_eq!(buffer, [-1.0; 20]);

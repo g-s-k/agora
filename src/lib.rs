@@ -63,7 +63,7 @@ use std::collections::{HashMap, HashSet};
 pub type Buffer<const SIZE: usize> = [f64; SIZE];
 
 /// Performs an isolated processing step in a signal graph.
-pub trait Node<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> {
+pub trait Node<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize>: Send {
     /// Generate or process serial data.
     ///
     /// The `buffer` parameter serves as both input and output.

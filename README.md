@@ -17,3 +17,5 @@ commands:
 - `cargo test` will run the tests and documentation examples
 - `cargo doc --open` will build the HTML documentation and open it in your
   default browser.
+- `cargo run --example tone` will run an example application that produces a
+  pair of test tones.

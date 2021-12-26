@@ -150,6 +150,21 @@ impl<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> Graph<BUFFER_SIZE, SAMP
         self.nodes.remove(&key.0).is_some()
     }
 
+    /// Replace an existing node in the graph, without modifying its connections.
+    ///
+    /// Returns the old Node. Only returns `None` if the old Node is not present in the Graph.
+    pub fn replace_node(
+        &mut self,
+        key: NodeReference,
+        new_node: Box<dyn Node<BUFFER_SIZE, SAMPLE_RATE>>,
+    ) -> Option<Box<dyn Node<BUFFER_SIZE, SAMPLE_RATE>>> {
+        // failsafe for case where somehow an invalid reference is used
+        if !self.node_order.contains(&key.0) {
+            self.node_order.push(key.0);
+        }
+        self.nodes.insert(key.0, new_node)
+    }
+
     /// Create a connection between a source node and a sink node.
     ///
     /// When signal is generated, the output of the source will be provided to the sink. Pass in a
@@ -174,13 +189,10 @@ impl<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> Graph<BUFFER_SIZE, SAMP
             return Err(ConnectError::CyclicalReference);
         }
 
-        self.connections
-            .entry(source.0)
-            .or_insert_with(HashSet::new)
-            .insert(sink.0);
+        self.connections.entry(source.0).or_default().insert(sink.0);
         self.connections_reverse
             .entry(sink.0)
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(source.0);
 
         self.refresh_node_order();
@@ -217,11 +229,15 @@ impl<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> Graph<BUFFER_SIZE, SAMP
             .copied()
             .collect();
 
+        no_incoming_edges.push(EXTERNAL_INPUT.0);
+
         // basically Kahn's algo, https://en.wikipedia.org/wiki/Topological_sorting#Kahn's_algorithm
         let empty_hash_set = HashSet::new();
         while !no_incoming_edges.is_empty() {
             let current_node = no_incoming_edges.pop().unwrap();
-            self.node_order.push(current_node);
+            if current_node != EXTERNAL_INPUT.0 {
+                self.node_order.push(current_node);
+            }
 
             for &destination in self
                 .connections
@@ -266,11 +282,12 @@ impl<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> Graph<BUFFER_SIZE, SAMP
         buffer_cache.insert(EXTERNAL_INPUT.0, buffer.to_owned());
 
         let empty_hash_set = HashSet::new();
-        for (key, node) in &mut self.nodes {
+        for key in &self.node_order {
+            let node = self.nodes.get_mut(&key).unwrap();
             let mut buf = [0.0; BUFFER_SIZE];
             sum_buffers(
                 self.connections_reverse
-                    .get(key)
+                    .get(&key)
                     .unwrap_or(&empty_hash_set)
                     .iter()
                     .map(|i| {
@@ -344,7 +361,7 @@ where
 
 #[cfg(test)]
 mod node_management {
-    use super::{Buffer, ConnectError, Graph, Node, EXTERNAL_INPUT};
+    use super::{Buffer, ConnectError, Graph, Node};
 
     struct NopNode;
     impl<const B: usize, const S: usize> Node<B, S> for NopNode {
@@ -367,7 +384,24 @@ mod node_management {
     #[test]
     fn reports_removal_status() {
         let mut g = Graph::<1, 1>::default();
-        assert!(!g.remove_node(EXTERNAL_INPUT));
+        let node_a = g.add_node(Box::new(NopNode));
+        assert!(g.remove_node(node_a));
+        assert!(!g.remove_node(node_a));
+    }
+
+    #[test]
+    fn can_replace_node() {
+        let mut g = Graph::<1, 1>::default();
+        let node_a = g.add_node(Box::new(NopNode));
+        assert!(g.replace_node(node_a, Box::new(NopNode)).is_some());
+    }
+
+    #[test]
+    fn reports_replacement_status() {
+        let mut g = Graph::<1, 1>::default();
+        let node_a = g.add_node(Box::new(NopNode));
+        assert!(g.remove_node(node_a));
+        assert!(g.replace_node(node_a, Box::new(NopNode)).is_none());
     }
 
     #[test]

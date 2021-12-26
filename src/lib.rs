@@ -359,6 +359,7 @@ impl<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> Graph<BUFFER_SIZE, SAMP
 
 /// Describes the type of error encountered when [making a connection](Graph::connect) between Nodes.
 #[derive(Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Error {
     /// Returned when a connection is attempted that would create a cycle in the graph.
     CyclicalReference,

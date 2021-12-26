@@ -71,9 +71,9 @@ handle it.</p>
 parallelize, but <em>some</em> work would still be necessary.</p>
 <h4 id="panics" class="section-header"><a href="#panics">Panics</a></h4>
 <p>The only (anticipated) panics in this library are in <a href="struct.Graph.html#method.process" title="Graph::process">Graph::process</a>, essentially as
-assertions to ensure the validity of the graph’s construction. These could be replaced with
-returned errors without much refactoring effort, but since they are checking the internal logic
-of the library it may be best to keep them as is.</p>
+assertions on the validity of the graph’s construction. These could be replaced with returned
+errors without much refactoring effort, but since they are checking the internal logic of the
+library it may be best to keep them as is.</p>
 </div></details><h2 id="structs" class="section-header"><a href="#structs">Structs</a></h2>
 <div class="item-table"><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.Graph.html" title="agora::Graph struct">Graph</a></div><div class="item-right docblock-short"><p>Orchestrate a group of <a href="trait.Node.html">processing nodes</a> and use that network to handle signal data.</p>
 </div></div><div class="item-row"><div class="item-left module-item"><a class="struct" href="struct.NodeReference.html" title="agora::NodeReference struct">NodeReference</a></div><div class="item-right docblock-short"><p>Provides a reference to a <a href="trait.Node.html" title="Node">Node</a> added to a <a href="struct.Graph.html" title="Graph">Graph</a>.</p>

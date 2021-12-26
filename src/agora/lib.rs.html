@@ -636,9 +636,9 @@
 <span class="doccomment">//! ### Panics</span>
 <span class="doccomment">//!</span>
 <span class="doccomment">//! The only (anticipated) panics in this library are in [Graph::process], essentially as</span>
-<span class="doccomment">//! assertions to ensure the validity of the graph&#39;s construction. These could be replaced with</span>
-<span class="doccomment">//! returned errors without much refactoring effort, but since they are checking the internal logic</span>
-<span class="doccomment">//! of the library it may be best to keep them as is.</span>
+<span class="doccomment">//! assertions on the validity of the graph&#39;s construction. These could be replaced with returned</span>
+<span class="doccomment">//! errors without much refactoring effort, but since they are checking the internal logic of the</span>
+<span class="doccomment">//! library it may be best to keep them as is.</span>
 
 <span class="attribute">#![<span class="ident">warn</span>(<span class="ident">missing_docs</span>)]</span>
 

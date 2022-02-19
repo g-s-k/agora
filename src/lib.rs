@@ -23,8 +23,8 @@
 //!
 //! - The time complexity of processing a buffer of data is linear in the number of nodes, and
 //! memory usage is linear in both the number of nodes and the specified buffer size.
-//! - The time complexity of adding or replacing a node, or removing a connection, is constant (amortized).
-//! - The time complexity of removing a node is linear in the number of nodes.
+//! - The time complexity of adding a node or removing a connection is constant (amortized).
+//! - The time complexity of replacing or removing a node is linear in the number of nodes.
 //! - The time complexity of connecting two nodes is proportional to the number of nodes times the
 //! number of existing connections. This is due to the recalculation of the critical path through
 //! the graph.
@@ -145,8 +145,11 @@ pub struct Graph<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> {
     nodes: HashMap<usize, Box<dyn Node<BUFFER_SIZE, SAMPLE_RATE>>>,
     connections: HashMap<usize, HashSet<usize>>,
     connections_reverse: HashMap<usize, HashSet<usize>>,
+    buffers: HashMap<usize, Buffer<BUFFER_SIZE>>,
     // topological sort, updated when connections are made
     node_order: Vec<usize>,
+    // nodes which are summed into the output
+    terminal_nodes: Vec<usize>,
 }
 
 impl<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> Graph<BUFFER_SIZE, SAMPLE_RATE> {
@@ -159,6 +162,8 @@ impl<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> Graph<BUFFER_SIZE, SAMP
         self.current_key += 1;
         self.nodes.insert(self.current_key, node);
         self.node_order.push(self.current_key);
+        self.buffers.insert(self.current_key, [0.0; BUFFER_SIZE]);
+        self.terminal_nodes.push(self.current_key);
         NodeReference(self.current_key)
     }
 
@@ -185,6 +190,7 @@ impl<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> Graph<BUFFER_SIZE, SAMP
         });
 
         self.node_order.retain(|&v| v != key.0);
+        self.terminal_nodes.retain(|&v| v != key.0);
 
         self.nodes.remove(&key.0).is_some()
     }
@@ -218,6 +224,7 @@ impl<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> Graph<BUFFER_SIZE, SAMP
             .entry(sink.0)
             .or_default()
             .insert(source.0);
+        self.refresh_terminal_nodes();
 
         match self.refresh_node_order() {
             Ok(new_order) => {
@@ -283,6 +290,20 @@ impl<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> Graph<BUFFER_SIZE, SAMP
         }
     }
 
+    fn refresh_terminal_nodes(&mut self) {
+        self.terminal_nodes = self
+            .nodes
+            .keys()
+            .filter(|&k| {
+                self.connections
+                    .get(k)
+                    .map(HashSet::is_empty)
+                    .unwrap_or(true)
+            })
+            .copied()
+            .collect();
+    }
+
     /// Remove a connection between nodes.
     ///
     /// Returns true if a connection was found and removed.
@@ -296,6 +317,8 @@ impl<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> Graph<BUFFER_SIZE, SAMP
             did_disconnect |= e.remove(&source.0);
         });
 
+        self.refresh_terminal_nodes();
+
         did_disconnect
     }
 
@@ -303,57 +326,48 @@ impl<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> Graph<BUFFER_SIZE, SAMP
     ///
     /// The `buffer` parameter serves as both input and output.
     pub fn process(&mut self, buffer: &mut Buffer<BUFFER_SIZE>) {
-        let mut buffer_cache = HashMap::new();
-        buffer_cache.insert(EXTERNAL_INPUT.0, buffer.to_owned());
+        if self.terminal_nodes.is_empty() {
+            // special case: no nodes feeding into output, just a passthrough
+            return;
+        }
 
-        let empty_hash_set = HashSet::new();
         for key in &self.node_order {
-            let node = self
+            // i blame the borrow checker for these semantics
+            for sample_index in 0..BUFFER_SIZE {
+                self.buffers.get_mut(key).unwrap()[sample_index] = self
+                    .connections_reverse
+                    .get(key)
+                    .map(|deps| {
+                        deps.iter()
+                            .map(|d| {
+                                if *d == EXTERNAL_INPUT.0 {
+                                    buffer[sample_index]
+                                } else {
+                                    self.buffers[d][sample_index]
+                                }
+                            })
+                            .sum()
+                    })
+                    .unwrap_or_default();
+            }
+
+            self
                 .nodes
                 .get_mut(&key)
-                .expect("Tried to access node that does not exist - this indicates a logic error in agora::Graph");
-            let mut buf = [0.0; BUFFER_SIZE];
-            sum_buffers(
-                self.connections_reverse
-                    .get(&key)
-                    .unwrap_or(&empty_hash_set)
-                    .iter()
-                    .map(|i| {
-                        buffer_cache
-                            .get(i)
-                            .expect("Cache miss - this indicates a logic error in agora::Graph")
-                    }),
-                &mut buf,
-            );
-            node.process(&mut buf);
-            buffer_cache.insert(*key, buf);
+                .expect("Tried to access node that does not exist - this indicates a logic error in agora::Graph")
+            .process(self.buffers.get_mut(&key).unwrap());
         }
 
-        let mut terminal_nodes: Vec<_> = self
-            .nodes
-            .keys()
-            .filter(|&k| {
-                self.connections
-                    .get(k)
-                    .map(HashSet::is_empty)
-                    .unwrap_or(true)
-            })
-            .copied()
-            .collect();
-
-        if terminal_nodes.is_empty() {
-            terminal_nodes = vec![EXTERNAL_INPUT.0];
+        buffer.fill(0.0);
+        for node_buffer in self.terminal_nodes.iter().map(|key| {
+            self.buffers
+                .get(&key)
+                .expect("Cache miss - this indicates a logic error in agora::Graph")
+        }) {
+            for (sample, dependency_sample) in buffer.iter_mut().zip(node_buffer) {
+                *sample += dependency_sample;
+            }
         }
-
-        *buffer = [0.0; BUFFER_SIZE];
-        sum_buffers(
-            terminal_nodes.into_iter().map(|key| {
-                buffer_cache
-                    .get(&key)
-                    .expect("Cache miss - this indicates a logic error in agora::Graph")
-            }),
-            buffer,
-        );
     }
 }
 
@@ -363,27 +377,6 @@ impl<const BUFFER_SIZE: usize, const SAMPLE_RATE: usize> Graph<BUFFER_SIZE, SAMP
 pub enum Error {
     /// Returned when a connection is attempted that would create a cycle in the graph.
     CyclicalReference,
-}
-
-/// Sum all inputs into a buffer.
-fn sum_buffers<'a, I, const SIZE: usize>(inputs: I, buffer: &mut Buffer<SIZE>)
-where
-    I: IntoIterator<Item = &'a Buffer<SIZE>>,
-{
-    let mut num_inputs: usize = 0;
-
-    for input in inputs {
-        for (sample, dependency_sample) in buffer.iter_mut().zip(input) {
-            *sample += dependency_sample;
-        }
-        num_inputs += 1;
-    }
-
-    if num_inputs > 1 {
-        buffer
-            .iter_mut()
-            .for_each(|sample| *sample /= num_inputs as f64);
-    }
 }
 
 #[cfg(test)]

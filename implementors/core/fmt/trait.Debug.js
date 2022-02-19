@@ -1,3 +1,3 @@
 (function() {var implementors = {};
-implementors["agora"] = [{"text":"impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.57.0/core/fmt/trait.Debug.html\" title=\"trait core::fmt::Debug\">Debug</a> for <a class=\"enum\" href=\"agora/enum.Error.html\" title=\"enum agora::Error\">Error</a>","synthetic":false,"types":["agora::Error"]}];
+implementors["agora"] = [{"text":"impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.58.1/core/fmt/trait.Debug.html\" title=\"trait core::fmt::Debug\">Debug</a> for <a class=\"enum\" href=\"agora/enum.Error.html\" title=\"enum agora::Error\">Error</a>","synthetic":false,"types":["agora::Error"]}];
 if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()
